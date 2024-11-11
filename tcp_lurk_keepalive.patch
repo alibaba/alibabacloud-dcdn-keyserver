@@ -1,0 +1,14 @@
+diff --git a/ngx_tcp_session.h b/ngx_tcp_session.h
+index 8dce358..308ac10 100644
+--- a/ngx_tcp_session.h
++++ b/ngx_tcp_session.h
+@@ -39,6 +39,9 @@ typedef struct ngx_tcp_session_s {
+     ngx_str_t              *addr_text;
+     ngx_str_t               host;
+ 
++#if (NGX_LURK_SSL_SERVER)
++    ngx_uint_t              keepalive_requests;
++#endif
+ } ngx_tcp_session_t;
+ 
+ 
