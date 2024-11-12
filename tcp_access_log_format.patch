@@ -1,0 +1,943 @@
+diff --git a/ngx_tcp.h b/ngx_tcp.h
+index 1dbfe5b..a9c619a 100644
+--- a/ngx_tcp.h
++++ b/ngx_tcp.h
+@@ -23,9 +23,11 @@ typedef struct ngx_tcp_check_peer_conf_s ngx_tcp_check_peer_conf_t;
+ typedef struct ngx_tcp_check_peers_conf_s ngx_tcp_check_peers_conf_t;
+ typedef struct check_conf_s check_conf_t;
+ 
++typedef ngx_variable_value_t  ngx_tcp_variable_value_t;
++
+ /* make nginx-0.8.22+ happy */
+ #if defined(nginx_version) && nginx_version >= 8022
+-typedef ngx_addr_t ngx_peer_addr_t; 
++typedef ngx_addr_t ngx_peer_addr_t;
+ #endif
+ 
+ #include <ngx_tcp_session.h>
+@@ -144,16 +146,31 @@ typedef struct {
+     ngx_uint_t               deny;      /* unsigned  deny:1; */
+ } ngx_tcp_access_rule_t;
+ 
++typedef struct {
++     ngx_array_t             formats; /* ngx_tcp_log_fmt_t */
++     unsigned                combined_used:1;
++} ngx_tcp_log_main_conf_t;
++
+ typedef struct {
+     ngx_array_t              servers;         /* ngx_tcp_core_srv_conf_t */
+     ngx_array_t              listen;          /* ngx_tcp_listen_t */
+     ngx_array_t              virtual_servers; /* ngx_tcp_virtual_server_t */
++    ngx_array_t              variables;
++    ngx_hash_keys_arrays_t  *variables_keys;
++    ngx_tcp_log_main_conf_t *access_log;
+ } ngx_tcp_core_main_conf_t;
+ 
++typedef struct {
++    ngx_str_t                name;
++    ngx_array_t             *flushes;
++    ngx_array_t             *ops;        /* array of ngx_tcp_log_op_t */
++} ngx_tcp_log_fmt_t;
++
+ typedef struct {
+     ngx_open_file_t         *file;
+     time_t                   disk_full_time;
+     time_t                   error_log_time;
++    ngx_tcp_log_fmt_t       *format;
+ } ngx_tcp_log_t;
+ 
+ typedef struct {
+@@ -170,6 +187,8 @@ typedef struct {
+     ngx_uint_t               open_file_cache_min_uses;
+ 
+     ngx_uint_t               off;        /* unsigned  off:1 */
++    ngx_array_t              formats;
++    ngx_flag_t               combined_used;
+ } ngx_tcp_log_srv_conf_t;
+ 
+ 
+@@ -214,6 +233,46 @@ typedef struct {
+     ngx_tcp_session_t      *session;
+ } ngx_tcp_log_ctx_t;
+ 
++#define NGX_TCP_VAR_CHANGEABLE   1
++#define NGX_TCP_VAR_NOCACHEABLE  2
++#define NGX_TCP_VAR_INDEXED      4
++#define NGX_TCP_VAR_NOHASH       8
++
++typedef struct ngx_tcp_variable_s  ngx_tcp_variable_t;
++typedef struct ngx_tcp_log_op_s  ngx_tcp_log_op_t;
++
++typedef void (*ngx_tcp_set_variable_pt) (ngx_tcp_session_t *s,
++    ngx_tcp_variable_value_t *v, void *data);
++typedef ngx_int_t (*ngx_tcp_get_variable_pt) (ngx_tcp_session_t *s,
++    ngx_tcp_variable_value_t *v, void *data);
++
++typedef u_char *(*ngx_tcp_log_op_run_pt) (ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op);
++
++typedef size_t (*ngx_tcp_log_op_getlen_pt) (ngx_tcp_session_t *s,
++    void *data);
++
++struct ngx_tcp_variable_s {
++    ngx_str_t                   name;   /* must be first to build the hash */
++    ngx_tcp_set_variable_pt     set_handler;
++    ngx_tcp_get_variable_pt     get_handler;
++    void                       *data;
++    ngx_uint_t                  flags;
++    ngx_uint_t                  index;
++};
++
++typedef struct {
++    ngx_str_t                   name;
++    size_t                      len;
++    ngx_tcp_log_op_run_pt       run;
++} ngx_tcp_log_var_t;
++
++struct ngx_tcp_log_op_s {
++    size_t                      len;
++    ngx_tcp_log_op_getlen_pt    getlen;
++    ngx_tcp_log_op_run_pt       run;
++    void                       *data;
++};
+ 
+ typedef void (*ngx_tcp_init_session_pt)(ngx_tcp_session_t *s);
+ typedef void (*ngx_tcp_init_protocol_pt)(ngx_event_t *rev);
+diff --git a/ngx_tcp_core_module.c b/ngx_tcp_core_module.c
+index 195a676..52e8e3b 100644
+--- a/ngx_tcp_core_module.c
++++ b/ngx_tcp_core_module.c
+@@ -11,6 +11,7 @@
+ 
+ 
+ static void *ngx_tcp_core_create_main_conf(ngx_conf_t *cf);
++static char* ngx_tcp_core_init_main_conf(ngx_conf_t *cf, void *conf);
+ static void *ngx_tcp_core_create_srv_conf(ngx_conf_t *cf);
+ static char *ngx_tcp_core_merge_srv_conf(ngx_conf_t *cf, void *parent,
+     void *child);
+@@ -30,6 +31,13 @@ static char *ngx_tcp_access_rule(ngx_conf_t *cf, ngx_command_t *cmd,
+     void *conf);
+ static char *ngx_tcp_log_set_access_log(ngx_conf_t *cf, ngx_command_t *cmd,
+     void *conf);
++static char * ngx_tcp_log_set_format(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
++static char * ngx_tcp_log_compile_format(ngx_conf_t *cf, ngx_array_t *ops,
++    ngx_array_t *args, ngx_uint_t s);
++static u_char * ngx_tcp_log_copy_short(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op);
++static u_char * ngx_tcp_log_copy_long(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op);
+ 
+ static ngx_command_t  ngx_tcp_core_commands[] = {
+ 
+@@ -135,6 +143,13 @@ static ngx_command_t  ngx_tcp_core_commands[] = {
+       0,
+       NULL },
+ 
++    { ngx_string("log_format"),
++      NGX_TCP_MAIN_CONF|NGX_TCP_SRV_CONF|NGX_CONF_TAKE12,
++      ngx_tcp_log_set_format,
++      NGX_TCP_SRV_CONF_OFFSET,
++      0,
++      NULL },
++
+     ngx_null_command
+ };
+ 
+@@ -143,7 +158,7 @@ static ngx_tcp_module_t  ngx_tcp_core_module_ctx = {
+     NULL,                                  /* protocol */
+ 
+     ngx_tcp_core_create_main_conf,         /* create main configuration */
+-    NULL,                                  /* init main configuration */
++    ngx_tcp_core_init_main_conf,           /* init main configuration */
+ 
+     ngx_tcp_core_create_srv_conf,          /* create server configuration */
+     ngx_tcp_core_merge_srv_conf            /* merge server configuration */
+@@ -167,12 +182,23 @@ ngx_module_t  ngx_tcp_core_module = {
+ 
+ 
+ static ngx_str_t  ngx_tcp_access_log = ngx_string("logs/tcp_access.log");
++static ngx_str_t  ngx_tcp_combined_fmt =
++    ngx_string("$log_time [$pid] $client_ip "
++               "$host_ip $accept_time $upstream_ip "
++               "$bytes_read $bytes_write");
+ 
+ 
++extern ngx_tcp_log_var_t  ngx_tcp_log_vars[];
++#if (NGX_LURK_SSL_SERVER)
++extern ngx_tcp_log_var_t  ngx_tcp_lurk_vars[];
++#endif
++
+ static void *
+-ngx_tcp_core_create_main_conf(ngx_conf_t *cf) 
++ngx_tcp_core_create_main_conf(ngx_conf_t *cf)
+ {
+     ngx_tcp_core_main_conf_t  *cmcf;
++    ngx_tcp_log_main_conf_t   *lmcf;
++    ngx_tcp_log_fmt_t         *fmt;
+ 
+     cmcf = ngx_pcalloc(cf->pool, sizeof(ngx_tcp_core_main_conf_t));
+     if (cmcf == NULL) {
+@@ -192,19 +218,75 @@ ngx_tcp_core_create_main_conf(ngx_conf_t *cf)
+         return NULL;
+     }
+ 
+-    if (ngx_array_init(&cmcf->virtual_servers, cf->pool, 4, 
++    if (ngx_array_init(&cmcf->virtual_servers, cf->pool, 4,
+                        sizeof(ngx_tcp_virtual_server_t)) != NGX_OK)
+     {
+         return NULL;
+     }
+ 
++    lmcf = cmcf->access_log = ngx_pcalloc(cf->pool, sizeof(ngx_tcp_log_main_conf_t));
++    if (lmcf == NULL) {
++        return NULL;
++    }
++
++    if (ngx_array_init(&lmcf->formats, cf->pool, 4, sizeof(ngx_tcp_log_fmt_t))
++        != NGX_OK)
++    {
++        return NULL;
++    }
++
++    fmt = ngx_array_push(&lmcf->formats);
++    if (fmt == NULL) {
++        return NULL;
++    }
++
++    ngx_str_set(&fmt->name, "combined");
++    lmcf->combined_used = 1;
++
++    fmt->ops = ngx_array_create(cf->pool, 16, sizeof(ngx_tcp_log_op_t));
++    if (fmt->ops == NULL) {
++        return NULL;
++    }
+ 
+     return cmcf;
+ }
+ 
+ 
++static char*
++ngx_tcp_core_init_main_conf(ngx_conf_t *cf, void *conf)
++{
++    ngx_str_t                 *value;
++    ngx_array_t                a;
++    ngx_tcp_log_fmt_t         *fmt;
++    ngx_tcp_core_main_conf_t  *cmcf = conf;
++    ngx_tcp_log_main_conf_t   *lmcf = cmcf->access_log;
++
++    if (lmcf->combined_used) {
++        if (ngx_array_init(&a, cf->pool, 1, sizeof(ngx_str_t)) != NGX_OK) {
++            return NGX_CONF_ERROR;
++        }
++
++        value = ngx_array_push(&a);
++        if (value == NULL) {
++            return NGX_CONF_ERROR;
++        }
++
++        *value = ngx_tcp_combined_fmt;
++        fmt = lmcf->formats.elts;
++
++        if (ngx_tcp_log_compile_format(cf, fmt->ops, &a, 0)
++            != NGX_CONF_OK)
++        {
++            return NGX_CONF_ERROR;
++        }
++    }
++
++    return NGX_CONF_OK;
++}
++
++
+ static void *
+-ngx_tcp_core_create_srv_conf(ngx_conf_t *cf) 
++ngx_tcp_core_create_srv_conf(ngx_conf_t *cf)
+ {
+     ngx_tcp_core_srv_conf_t  *cscf;
+     ngx_tcp_log_srv_conf_t   *lscf;
+@@ -244,7 +326,7 @@ ngx_tcp_core_create_srv_conf(ngx_conf_t *cf)
+     cscf->file_name = cf->conf_file->file.name.data;
+     cscf->line = cf->conf_file->line;
+ 
+-    lscf = cscf->access_log = ngx_pcalloc(cf->pool, 
++    lscf = cscf->access_log = ngx_pcalloc(cf->pool,
+                                           sizeof(ngx_tcp_log_srv_conf_t));
+     if (lscf == NULL) {
+         return NULL;
+@@ -263,15 +345,18 @@ ngx_tcp_core_create_srv_conf(ngx_conf_t *cf)
+ 
+ 
+ static char *
+-ngx_tcp_core_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child) 
++ngx_tcp_core_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
+ {
+-    ngx_uint_t               m;
+-    ngx_tcp_log_t           *log;
+-    ngx_tcp_module_t        *module;
+-    ngx_tcp_core_srv_conf_t *prev = parent;
+-    ngx_tcp_core_srv_conf_t *conf = child;
+-    ngx_tcp_log_srv_conf_t  *plscf = prev->access_log;
+-    ngx_tcp_log_srv_conf_t  *lscf = conf->access_log;
++    ngx_uint_t                 m;
++    ngx_tcp_log_t             *log;
++    ngx_tcp_module_t          *module;
++    ngx_tcp_core_srv_conf_t   *prev = parent;
++    ngx_tcp_core_srv_conf_t   *conf = child;
++    ngx_tcp_log_srv_conf_t    *plscf = prev->access_log;
++    ngx_tcp_log_srv_conf_t    *lscf = conf->access_log;
++    ngx_tcp_core_main_conf_t  *cmcf;
++    ngx_tcp_log_main_conf_t   *lmcf;
++    ngx_tcp_log_fmt_t         *fmt;
+ 
+     ngx_conf_merge_msec_value(conf->timeout, prev->timeout, 60000);
+     ngx_conf_merge_msec_value(conf->resolver_timeout,
+@@ -291,7 +376,7 @@ ngx_tcp_core_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
+             module = ngx_modules[m]->ctx;
+ 
+             /* TODO: use a function */
+-            if (module->protocol 
++            if (module->protocol
+                     && (ngx_strcmp(module->protocol->name.data, "tcp_generic")) == 0)
+             {
+                 conf->protocol = module->protocol;
+@@ -345,6 +430,13 @@ ngx_tcp_core_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
+     log->disk_full_time = 0;
+     log->error_log_time = 0;
+ 
++    cmcf = ngx_tcp_conf_get_module_main_conf(cf, ngx_tcp_core_module);
++    lmcf = cmcf->access_log;
++    fmt = lmcf->formats.elts;
++
++    /* the default "combined" format */
++    log->format = &fmt[0];
++
+     return NGX_CONF_OK;
+ }
+ 
+@@ -422,7 +514,7 @@ ngx_tcp_core_server(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ 
+ 
+ static char *
+-ngx_tcp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) 
++ngx_tcp_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ {
+     size_t                      len, off;
+     in_port_t                   port;
+@@ -691,7 +783,7 @@ ngx_tcp_core_protocol(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ 
+ 
+ static char *
+-ngx_tcp_core_resolver(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) 
++ngx_tcp_core_resolver(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ {
+     ngx_tcp_core_srv_conf_t  *cscf = conf;
+ 
+@@ -739,7 +831,7 @@ ngx_tcp_core_resolver(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ 
+ 
+ static char *
+-ngx_tcp_access_rule(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) 
++ngx_tcp_access_rule(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ {
+     ngx_tcp_core_srv_conf_t *cscf = conf;
+ 
+@@ -801,8 +893,8 @@ ngx_tcp_access_rule(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ static char *
+ ngx_tcp_log_set_access_log(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ {
+-    ngx_tcp_core_srv_conf_t *cscf = conf;
+-    ngx_tcp_log_srv_conf_t  *lscf = cscf->access_log;
++    ngx_tcp_core_srv_conf_t  *cscf = conf;
++    ngx_tcp_log_srv_conf_t   *lscf = cscf->access_log;
+ 
+     ssize_t                     size;
+     ngx_str_t                  *value, name;
+@@ -810,6 +902,10 @@ ngx_tcp_log_set_access_log(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ #if (nginx_version) >= 1003010 || (nginx_version) >= 1002007 && (nginx_version) < 1003000
+     ngx_tcp_log_buf_t         *buffer;
+ #endif
++    ngx_tcp_core_main_conf_t  *cmcf;
++    ngx_tcp_log_main_conf_t   *lmcf;
++    ngx_tcp_log_fmt_t         *fmt;
++    ngx_uint_t                 i;
+ 
+     value = cf->args->elts;
+ 
+@@ -843,7 +939,38 @@ ngx_tcp_log_set_access_log(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+         return NGX_CONF_ERROR;
+     }
+ 
+-    if (cf->args->nelts == 3) {
++    cmcf = ngx_tcp_conf_get_module_main_conf(cf, ngx_tcp_core_module);
++    lmcf = cmcf->access_log;
++
++    if (cf->args->nelts >= 3) {
++        name = value[2];
++
++        if (ngx_strcmp(name.data, "combined") == 0) {
++            lmcf->combined_used = 1;
++        }
++
++    } else {
++        ngx_str_set(&name, "combined");
++        lmcf->combined_used = 1;
++    }
++
++    fmt = lmcf->formats.elts;
++    for (i = 0; i < lmcf->formats.nelts; i++) {
++        if (fmt[i].name.len == name.len
++            && ngx_strcasecmp(fmt[i].name.data, name.data) == 0)
++        {
++            log->format = &fmt[i];
++            break;
++        }
++    }
++
++    if (log->format == NULL) {
++        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
++                           "unknown log format \"%V\"", &name);
++        return NGX_CONF_ERROR;
++    }
++
++    if (cf->args->nelts == 4) {
+         if (ngx_strncmp(value[2].data, "buffer=", 7) != 0) {
+             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                "invalid parameter \"%V\"", &value[2]);
+@@ -914,3 +1041,260 @@ ngx_tcp_log_set_access_log(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ 
+     return NGX_CONF_OK;
+ }
++
++
++static char *
++ngx_tcp_log_set_format(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
++{
++    ngx_str_t                *value;
++    ngx_uint_t                i;
++    ngx_tcp_log_fmt_t        *fmt;
++    ngx_tcp_core_main_conf_t *cmcf;
++    ngx_tcp_log_main_conf_t  *lmcf;
++
++    if (cf->cmd_type != NGX_TCP_MAIN_CONF) {
++        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
++                           "the \"log_format\" directive may be used "
++                           "only on \"tcp\" level");
++         return NGX_CONF_ERROR;
++    }
++
++    cmcf = ngx_tcp_conf_get_module_main_conf(cf, ngx_tcp_core_module);
++    lmcf = cmcf->access_log;
++
++    value = cf->args->elts;
++
++    fmt = lmcf->formats.elts;
++    for (i = 0; i < lmcf->formats.nelts; i++) {
++        if (fmt[i].name.len == value[1].len
++            && ngx_strcmp(fmt[i].name.data, value[1].data) == 0)
++        {
++            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
++                               "duplicate \"log_format\" name \"%V\"",
++                               &value[1]);
++            return NGX_CONF_ERROR;
++        }
++    }
++
++    fmt = ngx_array_push(&lmcf->formats);
++    if (fmt == NULL) {
++        return NGX_CONF_ERROR;
++    }
++
++    fmt->name = value[1];
++
++    fmt->ops = ngx_array_create(cf->pool, 16, sizeof(ngx_tcp_log_op_t));
++    if (fmt->ops == NULL) {
++        return NGX_CONF_ERROR;
++    }
++
++    return ngx_tcp_log_compile_format(cf, fmt->ops, cf->args, 2);
++}
++
++
++static char *
++ngx_tcp_log_compile_format(ngx_conf_t *cf, ngx_array_t *ops,
++    ngx_array_t *args, ngx_uint_t s)
++{
++    u_char              *data, *p, ch;
++    size_t               i, len;
++    ngx_str_t           *value, var, *name;
++    ngx_uint_t           bracket;
++    ngx_uint_t           square_bracket;
++    ngx_tcp_log_op_t    *op;
++    ngx_tcp_log_var_t   *v;
++
++    value = args->elts;
++
++    for ( /* void */ ; s < args->nelts; s++) {
++
++        i = 0;
++
++        while (i < value[s].len) {
++
++            op = ngx_array_push(ops);
++            if (op == NULL) {
++                return NGX_CONF_ERROR;
++            }
++
++            data = &value[s].data[i];
++
++            if (value[s].data[i] == '$') {
++
++                if (++i == value[s].len) {
++                    goto invalid;
++                }
++
++                if (value[s].data[i] == '{') {
++                    bracket = 1;
++
++                    if (++i == value[s].len) {
++                        goto invalid;
++                    }
++
++                    var.data = &value[s].data[i];
++
++                } else {
++                    bracket = 0;
++                    var.data = &value[s].data[i];
++                }
++                square_bracket = 0;
++
++                for (var.len = 0; i < value[s].len; i++, var.len++) {
++                    ch = value[s].data[i];
++
++                    if (ch == '}' && bracket) {
++                        i++;
++                        bracket = 0;
++                        break;
++                    }
++
++                    if ((ch >= 'A' && ch <= 'Z')
++                        || (ch >= 'a' && ch <= 'z')
++                        || (ch >= '0' && ch <= '9')
++                        || ch == '_') {
++                        continue;
++                    }
++
++                     /*'[' and ']' support geting value from map by key.  zhongsheng 2011-03-29*/
++                     if(ch == '[') {
++                          square_bracket = 1;
++                           continue;
++                     } else if (ch == ']' && square_bracket == 1) {
++                           square_bracket = 0;
++                           continue;
++                     }
++
++                    break;
++                }
++
++                if (bracket || square_bracket) {
++                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
++                                       "the closing bracket in \"%V\" "
++                                       "variable is missing", &var);
++                    return NGX_CONF_ERROR;
++                }
++
++                if (var.len == 0) {
++                    goto invalid;
++                }
++
++#if (NGX_LURK_SSL_SERVER)
++                for (v = ngx_tcp_lurk_vars; v->name.len; v++) {
++
++                    if (ngx_strncmp(v->name.data, var.data, v->name.len) == 0) {
++                        name = ngx_palloc(cf->pool, sizeof(ngx_str_t));
++                        if (name == NULL) {
++                            return NGX_CONF_ERROR;
++                        }
++                        name->data = var.data;
++                        name->len = var.len;
++
++                        op->len = v->len;
++                        op->run = v->run;
++                        op->data = name;
++
++                        goto found;
++                    }
++                }
++#endif
++
++                for (v = ngx_tcp_log_vars; v->name.len; v++) {
++
++                    if (ngx_strncmp(v->name.data, var.data, v->name.len) == 0) {
++                        name = ngx_palloc(cf->pool, sizeof(ngx_str_t));
++                        if (name == NULL) {
++                            return NGX_CONF_ERROR;
++                        }
++                        name->data = var.data;
++                        name->len = var.len;
++
++                        op->len = v->len;
++                        op->run = v->run;
++                        op->data = name;
++
++                        goto found;
++                    }
++                }
++
++                if (v->name.len == 0) {
++                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
++                                       "not found variables \"%V\"", &var);
++                    return NGX_CONF_ERROR;
++                }
++            found:
++
++                continue;
++            }
++
++            i++;
++
++            while (i < value[s].len && value[s].data[i] != '$') {
++                i++;
++            }
++
++            len = &value[s].data[i] - data;
++
++            if (len) {
++
++                op->len = len;
++
++                if (len <= sizeof(uintptr_t)) {
++                    op->run = ngx_tcp_log_copy_short;
++                    op->data = 0;
++
++                    while (len--) {
++                        op->data = (void *)((uintptr_t)op->data <<  8);
++                        op->data = (void *)((uintptr_t)op->data | data[len]);
++                    }
++
++                } else {
++                    op->run = ngx_tcp_log_copy_long;
++
++                    p = ngx_pnalloc(cf->pool, len);
++                    if (p == NULL) {
++                        return NGX_CONF_ERROR;
++                    }
++
++                    ngx_memcpy(p, data, len);
++                    op->data = p;
++                }
++            }
++        }
++    }
++
++    return NGX_CONF_OK;
++
++invalid:
++
++    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "invalid parameter \"%s\"", data);
++
++    return NGX_CONF_ERROR;
++}
++
++
++static u_char *
++ngx_tcp_log_copy_short(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op)
++{
++    size_t     len;
++    uintptr_t  data;
++
++    len = op->len;
++    data = (uintptr_t)op->data;
++
++    while (len--) {
++        *buf++ = (u_char) (data & 0xff);
++        data >>= 8;
++    }
++
++    return buf;
++}
++
++
++static u_char *
++ngx_tcp_log_copy_long(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op)
++{
++    return ngx_cpymem(buf, (u_char *) op->data, op->len);
++}
+diff --git a/ngx_tcp_log.c b/ngx_tcp_log.c
+index 572affd..c86d35f 100644
+--- a/ngx_tcp_log.c
++++ b/ngx_tcp_log.c
+@@ -6,24 +6,66 @@
+ 
+ 
+ static u_char * ngx_tcp_time(u_char *buf, time_t t);
+-static u_char *ngx_tcp_log_fill(ngx_tcp_session_t *s, u_char *buf);
+ static void ngx_tcp_log_write(ngx_tcp_session_t *s, ngx_tcp_log_t *log,
+     u_char *buf, size_t len);
+-
++static u_char * ngx_tcp_log_time(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op);
++static u_char * ngx_tcp_log_pid(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op);
++static u_char * ngx_tcp_log_client_ip(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op);
++static u_char * ngx_tcp_log_host_ip(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op);
++static u_char * ngx_tcp_log_upstream_ip(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op);
++static u_char * ngx_tcp_log_bytes_read(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op);
++static u_char * ngx_tcp_log_bytes_write(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op);
++static u_char * ngx_tcp_log_accept_time(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op);
++
++ngx_tcp_log_var_t  ngx_tcp_log_vars[] = {
++    { ngx_string("log_time"), sizeof("1970/09/28 12:00:00") - 1,
++      ngx_tcp_log_time},
++
++    { ngx_string("pid"), NGX_INT_T_LEN,
++      ngx_tcp_log_pid},
++
++    { ngx_string("client_ip"), NGX_SOCKADDR_STRLEN,
++      ngx_tcp_log_client_ip},
++
++    { ngx_string("host_ip"), NGX_SOCKADDR_STRLEN,
++      ngx_tcp_log_host_ip},
++
++    { ngx_string("accept_time"), sizeof("1970/09/28 12:00:00") - 1,
++      ngx_tcp_log_accept_time},
++
++    { ngx_string("upstream_ip"), NGX_SOCKADDR_STRLEN,
++      ngx_tcp_log_upstream_ip},
++
++    { ngx_string("bytes_read"), NGX_INT_T_LEN,
++      ngx_tcp_log_bytes_read},
++
++    { ngx_string("bytes_write"), NGX_INT_T_LEN,
++      ngx_tcp_log_bytes_write},
++
++    { ngx_null_string, 0, NULL }
++};
+ 
+ ngx_int_t
+ ngx_tcp_log_handler(ngx_tcp_session_t *s)
+ {
+     u_char                   *line, *p;
+     size_t                    len;
+-    ngx_uint_t                l;
+-    ngx_connection_t         *c;
++    ngx_uint_t                l, i;
+     ngx_tcp_log_t            *log;
++    ngx_tcp_log_op_t         *op;
+     ngx_open_file_t          *file;
+ #if (nginx_version) >= 1003010 || (nginx_version) >= 1002007 && (nginx_version) < 1003000
+     ngx_tcp_log_buf_t        *buffer;
+ #endif
+-   ngx_tcp_log_srv_conf_t    *lscf;
++    ngx_tcp_log_srv_conf_t   *lscf;
+     ngx_tcp_core_srv_conf_t  *cscf;
+ 
+     ngx_log_debug0(NGX_LOG_DEBUG_TCP, s->connection->log, 0,
+@@ -36,7 +78,6 @@ ngx_tcp_log_handler(ngx_tcp_session_t *s)
+         return NGX_OK;
+     }
+ 
+-    c = s->connection;
+     log = lscf->logs->elts;
+     for (l = 0; l < lscf->logs->nelts; l++) {
+ 
+@@ -53,15 +94,11 @@ ngx_tcp_log_handler(ngx_tcp_session_t *s)
+ 
+         len = 0;
+ 
+-        /* Calculate the length */
+-        len += sizeof("1970/09/28 12:00:00");   /* log time */
+-        len += NGX_INT64_LEN + 2;               /* [ngx_pid] */
+-        len += c->addr_text.len + 1;            /* client address */
+-        len += s->addr_text->len + 1;           /* this session address */
+-        len += sizeof("1970/09/28 12:00:00");   /* accept time */
+-        len += sizeof("255.255.255.255:65536"); /* upstream address */
+-        len += NGX_OFF_T_LEN + 1;               /* read bytes from client */
+-        len += NGX_OFF_T_LEN + 1;               /* write bytes to client */
++        op = log[l].format->ops->elts;
++        for (i = 0; i < log[l].format->ops->nelts; i++) {
++            len += op[i].len;
++        }
++
+         len += NGX_LINEFEED_SIZE;
+ 
+         file = log[l].file;
+@@ -83,7 +120,11 @@ ngx_tcp_log_handler(ngx_tcp_session_t *s)
+ 
+                 p = buffer->pos;
+ 
+-                p = ngx_tcp_log_fill(s, p);
++                for (i = 0; i < log[l].format->ops->nelts; i++) {
++                    p = op[i].run(s, p, &op[i]);
++                }
++
++                ngx_linefeed(p);
+ 
+                 buffer->pos = p;
+ 
+@@ -105,7 +146,11 @@ ngx_tcp_log_handler(ngx_tcp_session_t *s)
+ 
+                 p = file->pos;
+ 
+-                p = ngx_tcp_log_fill(s, p);
++                for (i = 0; i < log[l].format->ops->nelts; i++) {
++                    p = op[i].run(s, p, &op[i]);
++                }
++
++                ngx_linefeed(p);
+ 
+                 file->pos = p;
+ 
+@@ -121,7 +166,11 @@ ngx_tcp_log_handler(ngx_tcp_session_t *s)
+ 
+         p = line;
+ 
+-        p = ngx_tcp_log_fill(s, p);
++        for (i = 0; i < log[l].format->ops->nelts; i++) {
++            p = op[i].run(s, p, &op[i]);
++        }
++
++        ngx_linefeed(p);
+ 
+         ngx_tcp_log_write(s, &log[l], line, p - line);
+     }
+@@ -144,48 +193,6 @@ ngx_tcp_time(u_char *buf, time_t t)
+ }
+ 
+ 
+-static u_char *
+-ngx_tcp_log_fill(ngx_tcp_session_t *s, u_char *buf) 
+-{
+-    u_char              *last;
+-    ngx_str_t           *name;
+-    ngx_connection_t    *c;
+-    ngx_tcp_upstream_t  *u;
+-
+-    c = s->connection;
+-
+-    last = ngx_cpymem(buf, ngx_cached_err_log_time.data,
+-            ngx_cached_err_log_time.len);
+-
+-    last = ngx_sprintf(last, " [%P]", ngx_pid);
+-    last = ngx_sprintf(last, " %V", &c->addr_text);
+-    last = ngx_sprintf(last, " %V ", s->addr_text);
+-    last = ngx_tcp_time(last, s->start_sec);
+-    
+-    name = NULL;
+-    if (s->upstream) {
+-        u = s->upstream;
+-        if (u->peer.connection) {
+-            name = u->peer.name;
+-        }
+-    }
+-
+-    if (name) {
+-        last = ngx_sprintf(last, " %V", name);
+-    }
+-    else {
+-        last = ngx_sprintf(last, " -");
+-    }
+-
+-    last = ngx_sprintf(last, " %O", s->bytes_read);
+-    last = ngx_sprintf(last, " %O", s->bytes_write);
+-
+-    ngx_linefeed(last);
+-
+-    return last;
+-}
+-
+-
+ static void
+ ngx_tcp_log_write(ngx_tcp_session_t *s, ngx_tcp_log_t *log, u_char *buf,
+     size_t len)
+@@ -231,3 +238,83 @@ ngx_tcp_log_write(ngx_tcp_session_t *s, ngx_tcp_log_t *log, u_char *buf,
+         log->error_log_time = now;
+     }
+ }
++
++static u_char *
++ngx_tcp_log_time(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op)
++{
++    return  ngx_sprintf(buf, "%V", &ngx_cached_err_log_time);
++}
++
++
++static u_char *
++ngx_tcp_log_pid(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op)
++{
++    return  ngx_sprintf(buf, "%P", ngx_pid);
++}
++
++
++static u_char *
++ngx_tcp_log_client_ip(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op)
++{
++    return  ngx_sprintf(buf, "%V", &s->connection->addr_text);
++}
++
++
++static u_char *
++ngx_tcp_log_host_ip(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op)
++{
++    return  ngx_sprintf(buf, "%V", s->addr_text);
++}
++
++
++static u_char *
++ngx_tcp_log_upstream_ip(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op)
++{
++    ngx_tcp_upstream_t  *u;
++    ngx_str_t           *name;
++
++    name = NULL;
++
++    if (s->upstream) {
++        u = s->upstream;
++        if (u->peer.connection) {
++            name = u->peer.name;
++        }
++    }
++
++    if (name) {
++        return ngx_sprintf(buf, "%V", name);
++    }
++    else {
++        return ngx_sprintf(buf, " -");
++    }
++}
++
++
++static u_char *
++ngx_tcp_log_bytes_read(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op)
++{
++    return  ngx_sprintf(buf, "%ui", s->bytes_read);
++}
++
++
++static u_char *
++ngx_tcp_log_bytes_write(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op)
++{
++    return  ngx_sprintf(buf, "%ui", s->bytes_write);
++}
++
++
++static u_char *
++ngx_tcp_log_accept_time(ngx_tcp_session_t *s, u_char *buf,
++    ngx_tcp_log_op_t *op)
++{
++    return  ngx_tcp_time(buf, s->start_sec);
++}

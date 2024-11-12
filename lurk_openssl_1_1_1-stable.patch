@@ -1,0 +1,36 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 9af0c8995e..a55e6655c9 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -2442,6 +2442,7 @@ void SSL_set_allow_early_data_cb(SSL *s,
+                                  SSL_allow_early_data_cb_fn cb,
+                                  void *arg);
+ 
++void tls1_lookup_get_sig_and_md(uint16_t sigalg, int *psig, const EVP_MD **pmd);
+ # ifdef  __cplusplus
+ }
+ # endif
+diff --git a/ssl/t1_lib.c b/ssl/t1_lib.c
+index 5f657f888e..068a5d415e 100644
+--- a/ssl/t1_lib.c
++++ b/ssl/t1_lib.c
+@@ -2921,3 +2921,19 @@ uint8_t SSL_SESSION_get_max_fragment_length(const SSL_SESSION *session)
+ {
+     return session->ext.max_fragment_len_mode;
+ }
++
++void tls1_lookup_get_sig_and_md(uint16_t sigalg, int *psig, const EVP_MD **pmd)
++{
++    const EVP_MD *md = NULL;
++    const SIGALG_LOOKUP *lu = tls1_lookup_sigalg(sigalg);
++    if (!tls1_lookup_md(lu, &md))
++        return;
++    if (psig) {
++        if (lu)
++            *psig = lu->sig;
++        else
++            *psig = -1;
++    }
++    if(pmd)
++        *pmd = md;
++}

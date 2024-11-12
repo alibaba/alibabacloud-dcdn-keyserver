@@ -1,0 +1,6 @@
+[submodule "deps/nginx_tcp_proxy_module"]
+	path = deps/nginx_tcp_proxy_module
+	url = https://github.com/yaoweibin/nginx_tcp_proxy_module.git
+[submodule "deps/OpenSSL_1_1_1-stable"]
+	path = deps/OpenSSL_1_1_1-stable
+	url = https://github.com/openssl/openssl.git

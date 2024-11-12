@@ -1,0 +1,39 @@
+
+ngx_tcp_lurk_src="$ngx_addon_dir/src/ngx_tcp_lurk_module.c"
+ngx_tcp_lurk_deps="$ngx_addon_dir/src/ngx_tcp_lurk.h"
+
+if [ -n "$TCP_MODULES" ]; then
+    have=NGX_LURK_SSL_SERVER . auto/have
+
+    CORE_INCS="$CORE_INCS $ngx_addon_dir/src"
+
+    NGX_ADDON_DEPS="$NGX_ADDON_DEPS $ngx_tcp_lurk_deps"
+    NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_tcp_lurk_src"
+
+    EVENT_MODULES="$EVENT_MODULES ngx_tcp_lurk_module"
+else
+    cat << END
+    $0: error: the ngx_tcp_lurk_module addon error, depend on ngx_tcp_module.
+END
+    exit 1
+fi
+
+CFLAGS="$CFLAGS -Wno-deprecated-declarations"
+
+# check gcc pragma
+ngx_feature="compiler structure-packing pragma"
+ngx_feature_name="NGX_HAVE_PACK_PRAGMA"
+ngx_feature_run=yes
+ngx_feature_incs=
+ngx_feature_path=
+ngx_feature_libs=
+ngx_feature_test="#pragma pack(push, 1)
+                  struct test_s {
+                      char foo;
+                      int  bar;
+                  };
+                  #pragma pack(pop)
+
+                  if (sizeof(struct test_s) != (sizeof(char) + sizeof(int)))
+                      return 1;"
+. auto/feature
