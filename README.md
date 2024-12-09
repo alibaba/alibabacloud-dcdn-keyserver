@@ -24,9 +24,9 @@ $ patch -p1 -d nginx-1.26.2 < deps/nginx_tcp_proxy_module/tcp.patch
 $ cd nginx-1.26.2
 $ ./configure \
     --with-http_ssl_module \
-    --with-openssl=deps/OpenSSL_1_1_1-stable \
-    --add-module=deps/nginx_tcp_proxy_module \
-    --add-module=. \
+    --with-openssl=../deps/OpenSSL_1_1_1-stable \
+    --add-module=../deps/nginx_tcp_proxy_module \
+    --add-module=.. \
     --with-cc-opt="-Wno-implicit-fallthrough"
 
 $ make
@@ -63,6 +63,9 @@ events {
 }
 
 tcp {
+
+    log_format  main '{"time":$lurk_start_time,"client_ip":"$client_ip","server_ip":"$host_ip","lurk_id":$lurk_id,"lurk_type":$lurk_type,"lurk_error":$lurk_err_code}';
+    access_log  /usr/local/nginx/logs/lurk_access.log main;
 
     lurk_get_key_mode local;
 
@@ -131,4 +134,74 @@ http {
     }
 }
 
+```
+
+## Directives
+
+### lurk server
+#### lurk_get_key_mode
+Syntax: lurk_get_key_mode local;
+
+Context: tcp
+
+```
+lurk_get_key_mode local;
+```
+
+#### lurk
+Syntax: lurk;
+
+Context: tcp, server
+
+```
+lurk;
+```
+
+#### lurk_pkey_path
+Syntax: lurk_pkey_path path;
+
+Context: tcp, server
+
+```
+lurk_pkey_path /usr/local/nginx/conf/pkeys;
+```
+
+#### lurk_keepalive_requests
+Syntax: lurk_keepalive_requests number;
+
+Context: tcp, server
+
+```
+lurk_keepalive_requests 1000;
+```
+
+### Access log
+
+#### access_log
+Syntax: access_log off|path [format_name]
+
+Context: tcp
+
+Sets access log parameters. See `log_format` directive for more details about formats.
+
+```
+access_log  /usr/local/nginx/logs/lurk_access.log main;
+```
+
+#### log_format
+Syntax: log_format format_name format;
+
+Context: tcp
+
+Creates named log format similar to Nginx HTTP log formats. Several variables are supported within log format:
+* lurk_start_time
+* lurk_id
+* lurk_pkey_id
+* lurk_sni
+* lurk_type
+* lurk_client_ip
+* lurk_err_code
+
+```
+log_format  main '{"time":$lurk_start_time,"client_ip":"$client_ip","server_ip":"$host_ip","lurk_id":$lurk_id,"lurk_type":$lurk_type,"lurk_error":$lurk_err_code}';
 ```
