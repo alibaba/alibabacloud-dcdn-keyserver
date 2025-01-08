@@ -8,13 +8,9 @@
 #include <ngx_core.h>
 #include <ngx_tcp.h>
 
-#include <assert.h>
-
 #include <openssl/ssl.h>
 #include <openssl/md5.h>
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
 #include <openssl/kdf.h>
-#endif
 
 #include <ngx_tcp_lurk.h>
 
@@ -63,61 +59,6 @@
 #define NGX_TCP_LURK_PHASE_START                        0
 #define NGX_TCP_LURK_PHASE_REGISTER                     1
 #define NGX_TCP_LURK_PHASE_READY                        2
-
-#ifndef TLSEXT_hash_none
-#define TLSEXT_hash_none                                0
-#endif
-#ifndef TLSEXT_hash_md5
-#define TLSEXT_hash_md5                                 1
-#endif
-#ifndef TLSEXT_hash_sha1
-#define TLSEXT_hash_sha1                                2
-#endif
-#ifndef TLSEXT_hash_sha224
-#define TLSEXT_hash_sha224                              3
-#endif
-#ifndef TLSEXT_hash_sha256
-#define TLSEXT_hash_sha256                              4
-#endif
-#ifndef TLSEXT_hash_sha384
-#define TLSEXT_hash_sha384                              5
-#endif
-#ifndef TLSEXT_hash_sha512
-#define TLSEXT_hash_sha512                              6
-#endif
-
-#ifndef TLSEXT_signature_anonymous
-#define TLSEXT_signature_anonymous                      0
-#endif
-#ifndef TLSEXT_signature_rsa
-#define TLSEXT_signature_rsa                            1
-#endif
-#ifndef TLSEXT_signature_dsa
-#define TLSEXT_signature_dsa                            2
-#endif
-#ifndef TLSEXT_signature_ecdsa
-#define TLSEXT_signature_ecdsa                          3
-#endif
-
-#ifndef SSL_R_UNSUPPORTED_DIGEST_TYPE
-#define SSL_R_UNSUPPORTED_DIGEST_TYPE                   326
-#endif
-
-#ifndef SSL_F_TLS1_PRF
-#define SSL_F_TLS1_PRF                                  284
-#endif
-
-#ifndef NID_hmac
-#define NID_hmac                                        855
-#endif
-
-#ifndef EVP_PKEY_HMAC
-#define EVP_PKEY_HMAC                                   NID_hmac
-#endif
-
-#ifndef TLS1_2_VERSION
-#define TLS1_2_VERSION                                  0x0303
-#endif
 
 
 typedef struct {
@@ -209,9 +150,7 @@ typedef struct {
     ngx_str_t                 private_key_str;
 
     ngx_lurk_tls_master_rsa_input_payload_t     *rsa;
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
     ngx_lurk_tls_extended_master_rsa_entity_t   *ems_rsa;
-#endif
 } ngx_tcp_lurk_ctx_t;
 
 
@@ -353,12 +292,6 @@ ngx_uint_t      ngx_lurk_stat_count;
 static ngx_hash_t lurk_limit_keyid_runtime_tb;
 
 
-int ngx_tcp_lurk_tls1_prf(unsigned char *out, long digest_mask,
-    const void *seed1, int seed1_len, const void *seed2, int seed2_len,
-    const void *seed3, int seed3_len, const void *seed4, int seed4_len,
-    const void *seed5, int seed5_len, const unsigned char *sec, int slen);
-
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
 int ngx_tcp_lurk_tls1_prf_v2(long digest_mask,
     const void *seed1, size_t seed1_len,
     const void *seed2, size_t seed2_len,
@@ -366,26 +299,18 @@ int ngx_tcp_lurk_tls1_prf_v2(long digest_mask,
     const void *seed4, size_t seed4_len,
     const void *seed5, size_t seed5_len,
     const unsigned char *sec, size_t slen,
-    unsigned char *out, size_t olen);
-#endif
-
-int ngx_tcp_lurk_ssl3_prf(unsigned char *out,
-    const void *client_random, int client_random_len,
-    const void *server_random, int server_random_len,
-    const unsigned char *p, int len);
+    unsigned char *out, size_t olen, ngx_log_t *log);
 
 ngx_int_t ngx_tcp_lurk_prf(unsigned char *out, uint16_t version,
     long master_prf, const void *client_random, int client_random_len,
     const void *server_random, int server_random_len,
-    const unsigned char *p, int len);
+    const unsigned char *p, int len, ngx_log_t *log);
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
 ngx_int_t ngx_tcp_lurk_prf_ems(unsigned char *out, uint16_t version,
     long master_prf, const void *client_random, int client_random_len,
     const void *server_random, int server_random_len,
     const void *session_hash, int hashlen,
-    const unsigned char *p, int len);
-#endif
+    const unsigned char *p, int len, ngx_log_t *log);
 
 static ngx_int_t ngx_tcp_lurk_init_module(ngx_cycle_t *cf);
 static void ngx_tcp_lurk_init_session(ngx_tcp_session_t *s);
@@ -407,7 +332,6 @@ static void ngx_tcp_lurk_limit_keyid_handler(ngx_event_t *ev);
 static void *ngx_tcp_lurk_create_main_conf(ngx_conf_t *cf);
 static char *ngx_tcp_lurk_init_main_conf(ngx_conf_t *cf, void *conf);
 static ngx_int_t ngx_tcp_lurk_limit_keyid(ngx_tcp_session_t *s);
-static int hex2i(char ch);
 static void ngx_tcp_lurk_get_common_name(SSL *ssl, char *cn, size_t size);
 static ngx_int_t ngx_ssl_lurk_encrypt(ngx_str_t *key, ngx_str_t *in,
     ngx_str_t *out);
@@ -802,160 +726,6 @@ ngx_tcp_lurk_rsa_pms_padding(unsigned char *rsa_decrypt,
 }
 
 
-/* seed1 through seed5 are virtually concatenated */
-ngx_int_t
-ngx_tcp_lurk_tls1_p_hash(const EVP_MD *md, const unsigned char *sec,
-   int sec_len, const void *seed1, int seed1_len,
-   const void *seed2, int seed2_len, const void *seed3, int seed3_len,
-   const void *seed4, int seed4_len, const void *seed5, int seed5_len,
-   unsigned char *out, int olen)
-{
-    int             chunk;
-    size_t          j;
-    size_t          A1_len;
-    EVP_PKEY       *mac_key = NULL;
-    unsigned char   A1[EVP_MAX_MD_SIZE];
-    ngx_int_t       ret = NGX_ERROR;
-
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
-    EVP_MD_CTX     *ctx = EVP_MD_CTX_new();
-    EVP_MD_CTX     *ctx_tmp = EVP_MD_CTX_new();
-    EVP_MD_CTX     *ctx_init = EVP_MD_CTX_new();
-#else
-    EVP_MD_CTX      md_ctx, md_ctx_tmp, md_ctx_init;
-    EVP_MD_CTX     *ctx = &md_ctx;
-    EVP_MD_CTX     *ctx_tmp = &md_ctx_tmp;
-    EVP_MD_CTX     *ctx_init = &md_ctx_init;
-#endif
-
-    if (!ctx || !ctx_init || !ctx_tmp) {
-        goto err;
-    }
-
-    chunk = EVP_MD_size(md);
-
-    OPENSSL_assert(chunk >= 0);
-
-    EVP_MD_CTX_init(ctx);
-    EVP_MD_CTX_init(ctx_tmp);
-    EVP_MD_CTX_init(ctx_init);
-    EVP_MD_CTX_set_flags(ctx_init, EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
-
-    mac_key = EVP_PKEY_new_mac_key(EVP_PKEY_HMAC, NULL, sec, sec_len);
-    if (!mac_key) {
-        goto err;
-    }
-
-    if (!EVP_DigestSignInit(ctx_init, NULL, md, NULL, mac_key)) {
-        goto err;
-    }
-
-    if (!EVP_MD_CTX_copy_ex(ctx, ctx_init)) {
-        goto err;
-    }
-
-    if (seed1 && !EVP_DigestSignUpdate(ctx, seed1, seed1_len)) {
-        goto err;
-    }
-
-    if (seed2 && !EVP_DigestSignUpdate(ctx, seed2, seed2_len)) {
-        goto err;
-    }
-
-    if (seed3 && !EVP_DigestSignUpdate(ctx, seed3, seed3_len)) {
-        goto err;
-    }
-
-    if (seed4 && !EVP_DigestSignUpdate(ctx, seed4, seed4_len)) {
-        goto err;
-    }
-
-    if (seed5 && !EVP_DigestSignUpdate(ctx, seed5, seed5_len)) {
-        goto err;
-    }
-
-    if (!EVP_DigestSignFinal(ctx, A1, &A1_len)) {
-        goto err;
-    }
-
-    for (;;) {
-        /* Reinit mac contexts */
-        if (!EVP_MD_CTX_copy_ex(ctx, ctx_init)) {
-            goto err;
-        }
-
-        if (!EVP_DigestSignUpdate(ctx, A1, A1_len)) {
-            goto err;
-        }
-
-        if (olen > chunk && !EVP_MD_CTX_copy_ex(ctx_tmp, ctx)) {
-            goto err;
-        }
-
-        if (seed1 && !EVP_DigestSignUpdate(ctx, seed1, seed1_len)) {
-            goto err;
-        }
-
-        if (seed2 && !EVP_DigestSignUpdate(ctx, seed2, seed2_len)) {
-            goto err;
-        }
-
-        if (seed3 && !EVP_DigestSignUpdate(ctx, seed3, seed3_len)) {
-            goto err;
-        }
-
-        if (seed4 && !EVP_DigestSignUpdate(ctx, seed4, seed4_len)) {
-            goto err;
-        }
-
-        if (seed5 && !EVP_DigestSignUpdate(ctx, seed5, seed5_len)) {
-            goto err;
-        }
-
-        if (olen > chunk) {
-            if (!EVP_DigestSignFinal(ctx, out, &j)) {
-                goto err;
-            }
-
-            out += j;
-            olen -= j;
-            /* calc the next A1 value */
-            if (!EVP_DigestSignFinal(ctx_tmp, A1, &A1_len)) {
-                goto err;
-            }
-
-        } else {                /* last one */
-
-            if (!EVP_DigestSignFinal(ctx, A1, &A1_len)) {
-                goto err;
-            }
-
-            memcpy(out, A1, olen);
-            break;
-        }
-    }
-
-    ret = NGX_OK;
-
- err:
-    if (mac_key) {
-        EVP_PKEY_free(mac_key);
-    }
-
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
-    EVP_MD_CTX_free(ctx);
-    EVP_MD_CTX_free(ctx_tmp);
-    EVP_MD_CTX_free(ctx_init);
-#else
-    EVP_MD_CTX_cleanup(ctx);
-    EVP_MD_CTX_cleanup(ctx_tmp);
-    EVP_MD_CTX_cleanup(ctx_init);
-#endif
-    OPENSSL_cleanse(A1, sizeof(A1));
-
-    return ret;
-}
-
 # define SSL_MD_MD5_IDX         0
 # define SSL_MD_SHA1_IDX        1
 # define SSL_MD_GOST94_IDX      2
@@ -970,22 +740,7 @@ ngx_tcp_lurk_tls1_p_hash(const EVP_MD *md, const unsigned char *sec,
 # define SSL_MD_SHA512_IDX     11
 # define SSL_MAX_DIGEST        12
 
-#if OPENSSL_VERSION_NUMBER < 0x10100003L
 
-
-#define SSL_HANDSHAKE_MAC_MD5 0x10
-#define SSL_HANDSHAKE_MAC_SHA 0x20
-#define SSL_HANDSHAKE_MAC_GOST94 0x40
-#define SSL_HANDSHAKE_MAC_SHA256 0x80
-#define SSL_HANDSHAKE_MAC_SHA384 0x100
-#define SSL_HANDSHAKE_MAC_MD5_SHA1 0x200
-#define SSL_HANDSHAKE_MAC_SHA224 0x400
-#define SSL_HANDSHAKE_MAC_SHA512 0x800
-
-#define SSL_HANDSHAKE_MAC_DEFAULT (SSL_HANDSHAKE_MAC_MD5 | SSL_HANDSHAKE_MAC_SHA)
-
-
-#else /* OPENSSL_VERSION_NUMBER */
 /*
  * When adding new digest in the ssl_ciph.c and increment SSL_MD_NUM_IDX make
  * sure to update this constant too
@@ -1019,9 +774,6 @@ ngx_tcp_lurk_tls1_p_hash(const EVP_MD *md, const unsigned char *sec,
 # define TLS1_PRF            (SSL_MD_MD5_SHA1_IDX << TLS1_PRF_DGST_SHIFT)
 
 
-#endif  /* OPENSSL_VERSION_NUMBER */
-
-
 #define SSL_MD_NUM_IDX  SSL_MAX_DIGEST
 static const EVP_MD *ssl_digest_methods[SSL_MD_NUM_IDX] = {
     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
@@ -1039,23 +791,16 @@ void
 ngx_tcp_lurk_load_ssl_method(void)
 {
     ssl_digest_methods[SSL_MD_MD5_IDX] = EVP_get_digestbyname(SN_md5);
-    OPENSSL_assert(EVP_MD_size(ssl_digest_methods[SSL_MD_MD5_IDX]) >= 0);
-
     ssl_digest_methods[SSL_MD_SHA1_IDX] = EVP_get_digestbyname(SN_sha1);
-    OPENSSL_assert(EVP_MD_size(ssl_digest_methods[SSL_MD_SHA1_IDX]) >= 0);
-
     ssl_digest_methods[SSL_MD_GOST94_IDX] =
                                 EVP_get_digestbyname(SN_id_GostR3411_94);
     ssl_digest_methods[SSL_MD_GOST89MAC_IDX] =
                                 EVP_get_digestbyname(SN_id_Gost28147_89_MAC);
-
     ssl_digest_methods[SSL_MD_SHA256_IDX] = EVP_get_digestbyname(SN_sha256);
     ssl_digest_methods[SSL_MD_SHA384_IDX] = EVP_get_digestbyname(SN_sha384);
 
 #if defined(NID_md5_sha1)
-# if OPENSSL_VERSION_NUMBER >= 0x10100003L
     ssl_digest_methods[SSL_MD_MD5_SHA1_IDX] = EVP_md5_sha1();
-# endif
 #endif
 #if defined(NID_sha224)
     ssl_digest_methods[SSL_MD_SHA224_IDX] = EVP_sha224();
@@ -1084,76 +829,6 @@ ssl_get_handshake_digest(int idx, long *mask, const EVP_MD **md)
 }
 
 
-/* seed1 through seed5 are virtually concatenated */
-int
-ngx_tcp_lurk_tls1_prf(unsigned char *out, long digest_mask,
-    const void *seed1, int seed1_len, const void *seed2, int seed2_len,
-    const void *seed3, int seed3_len, const void *seed4, int seed4_len,
-    const void *seed5, int seed5_len, const unsigned char *sec, int slen)
-{
-    int                   len, i, idx, count, olen;
-    long                  m;
-    const EVP_MD         *md;
-    unsigned char        *out1;
-    const unsigned char  *s1;
-    unsigned char         buff[SSL_MAX_MASTER_KEY_LENGTH];
-
-    out1 = &buff[0];
-    olen = sizeof(buff);
-
-    /* Count number of digests and partition sec evenly */
-    count = 0;
-    for (idx = 0; ssl_get_handshake_digest(idx, &m, &md); idx++) {
-        if (m & digest_mask) {
-            count++;
-        }
-    }
-
-    if (!count) {
-        /* Should never happen */
-        SSLerr(SSL_F_TLS1_PRF, ERR_R_INTERNAL_ERROR);
-        goto err;
-    }
-
-    len = slen / count;
-    if (count == 1) {
-        slen = 0;
-    }
-
-    s1 = sec;
-    memset(out, 0, olen);
-
-    for (idx = 0; ssl_get_handshake_digest(idx, &m, &md); idx++) {
-        if (m & digest_mask) {
-            if (!md) {
-                SSLerr(SSL_F_TLS1_PRF, SSL_R_UNSUPPORTED_DIGEST_TYPE);
-                goto err;
-            }
-
-            if (ngx_tcp_lurk_tls1_p_hash(md, s1, len + (slen & 1),
-                                         seed1, seed1_len, seed2, seed2_len,
-                                         seed3, seed3_len, seed4, seed4_len,
-                                         seed5, seed5_len, out1, olen)
-                != NGX_OK)
-            {
-                goto err;
-            }
-
-            s1 += len;
-            for (i = 0; i < olen; i++) {
-                out[i] ^= out1[i];
-            }
-        }
-    }
-
-    return SSL3_MASTER_SECRET_SIZE;
-
- err:
-    return 0;
-}
-
-
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
 /* seed1 through seed5 are concatenated */
 int ngx_tcp_lurk_tls1_prf_v2(long digest_mask,
                     const void *seed1, size_t seed1_len,
@@ -1162,7 +837,7 @@ int ngx_tcp_lurk_tls1_prf_v2(long digest_mask,
                     const void *seed4, size_t seed4_len,
                     const void *seed5, size_t seed5_len,
                     const unsigned char *sec, size_t slen,
-                    unsigned char *out, size_t olen)
+                    unsigned char *out, size_t olen, ngx_log_t *log)
 {
     const EVP_MD *md = NULL;
     EVP_PKEY_CTX *pctx = NULL;
@@ -1173,7 +848,8 @@ int ngx_tcp_lurk_tls1_prf_v2(long digest_mask,
     ssl_get_handshake_digest(digest_mask, &m, &md);
     if (md == NULL) {
         /* Should never happen */
-        SSLerr(SSL_F_TLS1_PRF, ERR_R_INTERNAL_ERROR);
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "[tcp lurk] ssl_get_handshake_digest failed");
         return 0;
     }
     pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_TLS1_PRF, NULL);
@@ -1201,95 +877,21 @@ int ngx_tcp_lurk_tls1_prf_v2(long digest_mask,
     EVP_PKEY_CTX_free(pctx);
     return ret;
 }
-#endif
-
-
-int
-ngx_tcp_lurk_ssl3_prf(unsigned char *out,
-    const void *client_random, int client_random_len,
-    const void *server_random, int server_random_len,
-    const unsigned char *p, int len)
-{
-    static const unsigned char *salt[3] = {
-#ifndef CHARSET_EBCDIC
-        (const unsigned char *)"A",
-        (const unsigned char *)"BB",
-        (const unsigned char *)"CCC",
-#else
-        (const unsigned char *)"\x41",
-        (const unsigned char *)"\x42\x42",
-        (const unsigned char *)"\x43\x43\x43",
-#endif
-    };
-
-    int               i, ret = 0;
-    unsigned int      n;
-    unsigned char     buf[EVP_MAX_MD_SIZE];
-
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
-    EVP_MD_CTX       *ctx = EVP_MD_CTX_new();
-#else
-    EVP_MD_CTX        md_ctx;
-    EVP_MD_CTX       *ctx = &md_ctx;
-#endif
-    if (ctx == NULL)
-        return ret;
-
-    EVP_MD_CTX_init(ctx);
-    for (i = 0; i < 3; i++) {
-        if (EVP_DigestInit_ex(ctx, EVP_sha1(), NULL) <= 0 ||
-            EVP_DigestUpdate(ctx, salt[i], strlen((const char *)salt[i])) <= 0 ||
-            EVP_DigestUpdate(ctx, p, len) <= 0 ||
-            EVP_DigestUpdate(ctx, client_random, client_random_len) <= 0 ||
-            EVP_DigestUpdate(ctx, server_random, server_random_len) <= 0 ||
-            EVP_DigestFinal_ex(ctx, buf, &n) <= 0 ||
-            EVP_DigestInit_ex(ctx, EVP_md5(), NULL) <= 0 ||
-            EVP_DigestUpdate(ctx, p, len) <= 0 ||
-            EVP_DigestUpdate(ctx, buf, n) <= 0 ||
-            EVP_DigestFinal_ex(ctx, out, &n) <= 0)
-        {
-            ret = 0;
-            break;
-        }
-        out += n;
-        ret += n;
-    }
-
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
-    EVP_MD_CTX_free(ctx);
-#else
-    EVP_MD_CTX_cleanup(ctx);
-#endif
-
-    return ret;
-}
 
 
 ngx_int_t
 ngx_tcp_lurk_prf(unsigned char *out, uint16_t version, long master_prf,
     const void *client_random, int client_random_len,
     const void *server_random, int server_random_len,
-    const unsigned char *p, int len)
+    const unsigned char *p, int len, ngx_log_t *log)
 {
     int  rc;
 
-    if (version == SSL3_VERSION) {
-        rc = ngx_tcp_lurk_ssl3_prf(out, client_random, SSL3_RANDOM_SIZE,
-                    server_random, SSL3_RANDOM_SIZE, p, len);
-    } else {
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
-        rc = ngx_tcp_lurk_tls1_prf_v2(master_prf,
-                 TLS_MD_MASTER_SECRET_CONST, TLS_MD_MASTER_SECRET_CONST_SIZE,
-                 client_random, client_random_len, NULL, 0,
-                 server_random, server_random_len, NULL, 0,
-                 p, len, out, SSL3_MASTER_SECRET_SIZE);
-#else
-        rc = ngx_tcp_lurk_tls1_prf(out, master_prf,
-                 TLS_MD_MASTER_SECRET_CONST, TLS_MD_MASTER_SECRET_CONST_SIZE,
-                 client_random, client_random_len, NULL, 0,
-                 server_random, server_random_len, NULL, 0, p, len);
-#endif
-    }
+    rc = ngx_tcp_lurk_tls1_prf_v2(master_prf,
+                TLS_MD_MASTER_SECRET_CONST, TLS_MD_MASTER_SECRET_CONST_SIZE,
+                client_random, client_random_len, NULL, 0,
+                server_random, server_random_len, NULL, 0,
+                p, len, out, SSL3_MASTER_SECRET_SIZE, log);
 
     return rc > 0 ? NGX_OK : NGX_ERROR;
 }
@@ -1339,19 +941,15 @@ ngx_tcp_lurk_get_common_name(SSL *ssl, char *cn, size_t size)
 }
 
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
 ngx_int_t ngx_tcp_lurk_prf_ems(unsigned char *out, uint16_t version,
     long master_prf, const void *client_random, int client_random_len,
     const void *server_random, int server_random_len,
     const void *session_hash, int hashlen,
-    const unsigned char *p, int len)
+    const unsigned char *p, int len, ngx_log_t *log)
 {
     int  rc;
 
-    if (version <= SSL3_VERSION) {
-        rc = ngx_tcp_lurk_ssl3_prf(out, client_random, SSL3_RANDOM_SIZE,
-                    server_random, SSL3_RANDOM_SIZE, p, len);
-    } else if(version < TLS1_3_VERSION){
+    if(version > SSL3_VERSION && version < TLS1_3_VERSION){
         rc = ngx_tcp_lurk_tls1_prf_v2(master_prf,
                 TLS_MD_EXTENDED_MASTER_SECRET_CONST,
                 TLS_MD_EXTENDED_MASTER_SECRET_CONST_SIZE,
@@ -1360,14 +958,13 @@ ngx_int_t ngx_tcp_lurk_prf_ems(unsigned char *out, uint16_t version,
                 NULL, 0,
                 NULL, 0,
                 p, len,
-                out, SSL3_MASTER_SECRET_SIZE);
+                out, SSL3_MASTER_SECRET_SIZE, log);
     } else {
         return NGX_ERROR;
     }
 
     return rc > 0 ? NGX_OK : NGX_ERROR;
 }
-#endif
 
 
 static void
@@ -2103,9 +1700,7 @@ ngx_tcp_lurk_parse_request(ngx_tcp_session_t *s)
             case NGX_LURK_QUERY_TYPE_PFS_RSA_MASTER:
             case NGX_LURK_QUERY_TYPE_ECDHE:
             case NGX_LURK_QUERY_TYPE_PFS_NON_PREDICTABLE_ECDHE:
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
             case NGX_LURK_QUERY_TYPE_CERT_VERIFY:
-#endif
                 break;
             default:
                 (void) ngx_atomic_fetch_add(ngx_lurk_fail_bad_type, 1);
@@ -2278,22 +1873,16 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
         return NGX_ERROR;
     }
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
     switch (EVP_PKEY_id(pkey)) {
-#else
-    switch (pkey->type) {
-#endif
+
     case EVP_PKEY_RSA:
         rsa = EVP_PKEY_get1_RSA(pkey);
         if (rsa == NULL) {
             return NGX_ERROR;
         }
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
         RSA_get0_key(rsa, &n, NULL, NULL);
-#else
-        n = rsa->n;
-#endif
+
         hex = BN_bn2hex(n);
 
         break;
@@ -2402,15 +1991,7 @@ ngx_tcp_lurk_buf_init(ngx_tcp_session_t *s)
 
     ctx = ngx_tcp_get_module_ctx(s, ngx_tcp_lurk_module);
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
     ctx->pkey_size = EVP_PKEY_size(ctx->evp_pkey);
-#else
-    if (ctx->evp_pkey->type == EVP_PKEY_RSA) {
-        ctx->pkey_size = RSA_size(ctx->evp_pkey->pkey.rsa);
-    } else if (ctx->evp_pkey->type == EVP_PKEY_EC) {
-        ctx->pkey_size = ECDSA_size(ctx->evp_pkey->pkey.ec);
-    }
-#endif
 
     buf = ctx->buf;
 
@@ -2546,9 +2127,7 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
 
     ctx->master_prf = master_prf;
     ctx->rsa = rsa;
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
     ctx->ems_rsa = NULL;
-#endif
 
     pkey = ctx->evp_pkey;
 
@@ -2577,18 +2156,10 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
 
     (void) ngx_atomic_fetch_add(ngx_lurk_request_master_secret, 1);
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
     pkey_type = EVP_PKEY_id(pkey);
-#else
-    pkey_type = pkey->type;
-#endif
     if (pkey_type == EVP_PKEY_RSA) {
         ret = RSA_private_decrypt(enpms.len, enpms.data, decrypt_res.data,
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
                                   EVP_PKEY_get0_RSA(pkey),
-#else
-                                  pkey->pkey.rsa,
-#endif
                                   RSA_NO_PADDING);
 
         if (ret == -1 || ret > ctx->pkey_size) {
@@ -2620,12 +2191,8 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
         (void) ngx_atomic_fetch_add(ngx_lurk_pkey_rsa, 1);
 
     } else if (pkey_type == EVP_PKEY_EC) {
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
         EC_KEY *ec = EVP_PKEY_get0_EC_KEY(pkey);
         group = EC_KEY_get0_group(ec);
-#else
-        group = EC_KEY_get0_group(pkey->pkey.ec);
-#endif
 
         ec_point = EC_POINT_new(group);
         if (ec_point == NULL) {
@@ -2651,11 +2218,7 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
 
         field_size = EC_GROUP_get_degree(group);
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
         ret = ECDH_compute_key(decrypt_res.data, (field_size+7)/8, ec_point, ec, NULL);
-#else
-        ret = ECDH_compute_key(decrypt_res.data, (field_size+7)/8, ec_point, pkey->pkey.ec, NULL);
-#endif
         EC_POINT_free(ec_point);
         BN_CTX_free(bn_ctx);
 
@@ -2689,7 +2252,7 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
     if (ngx_tcp_lurk_prf(master_secret->pos, rsa->edge_server_version,
                     master_prf, &rsa->client_random[0], SSL3_RANDOM_SIZE,
                     &rsa->edge_server_random[0], SSL3_RANDOM_SIZE,
-                    decrypt_res.data, len) != NGX_OK)
+                    decrypt_res.data, len, s->connection->log) != NGX_OK)
     {
         ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
                            "[sni:%V][client_ip:%V]rsa master prf fail",
@@ -2715,7 +2278,6 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
 }
 
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
 static ngx_int_t
 ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
 {
@@ -2862,12 +2424,8 @@ ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
         (void) ngx_atomic_fetch_add(ngx_lurk_pkey_rsa, 1);
 
     } else if (pkey_type == EVP_PKEY_EC) {
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
         EC_KEY *ec = EVP_PKEY_get0_EC_KEY(pkey);
         group = EC_KEY_get0_group(ec);
-#else
-        group = EC_KEY_get0_group(pkey->pkey.ec);
-#endif
 
         ec_point = EC_POINT_new(group);
         if (ec_point == NULL) {
@@ -2893,11 +2451,8 @@ ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
 
         field_size = EC_GROUP_get_degree(group);
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
         ret = ECDH_compute_key(decrypt_res.data, (field_size+7)/8, ec_point, ec, NULL);
-#else
-        ret = ECDH_compute_key(decrypt_res.data, (field_size+7)/8, ec_point, pkey->pkey.ec, NULL);
-#endif
+
         EC_POINT_free(ec_point);
         BN_CTX_free(bn_ctx);
 
@@ -2933,7 +2488,7 @@ ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
                     master_prf, &rsa->client_random[0], SSL3_RANDOM_SIZE,
                     &rsa->edge_server_random[0], SSL3_RANDOM_SIZE,
                     session_hash.data, session_hash.len,
-                    decrypt_res.data, len) != NGX_OK)
+                    decrypt_res.data, len, s->connection->log) != NGX_OK)
     {
         ctx->err = NGX_LURK_RESPONSE_ERROR_INTERNAL;
         ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
@@ -2957,7 +2512,6 @@ ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
 
     return NGX_OK;
 }
-#endif /* OPENSSL_VERSION_NUMBER */
 
 
 static ngx_int_t
@@ -2979,13 +2533,9 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
     ngx_tcp_lurk_ctx_t                 *ctx;
     ngx_lurk_tls_ecdhe_input_payload_t *ecdhe;
     ngx_str_t                           private_key_str;
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
     EVP_MD_CTX                         *md_ctx = EVP_MD_CTX_new();
     EVP_PKEY_CTX                       *pctx = NULL;
-#else
-    EVP_MD_CTX                          evp_md_ctx;
-    EVP_MD_CTX                         *md_ctx = &evp_md_ctx;
-#endif
+
     if (md_ctx == NULL) {
         return NGX_ERROR;
     }
@@ -3049,11 +2599,7 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
         sig_id = (ecdhe->signature_scheme >> 8) & 0xFF;
     }
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
     pkey_type = EVP_PKEY_id(pkey);
-#else
-    pkey_type = pkey->type;
-#endif
     if (pkey_type == EVP_PKEY_RSA
         && sig_id == TLSEXT_signature_rsa
         && ecdhe->version < TLS1_2_VERSION
@@ -3080,11 +2626,7 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
 
         if (RSA_sign(NID_md5_sha1, md_buf, j,
                      sign, &sign_len,
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
                      EVP_PKEY_get0_RSA(pkey)
-#else
-                     pkey->pkey.rsa
-#endif
                     ) <= 0)
         {
             ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
@@ -3129,7 +2671,6 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
         //EVP_MD_CTX_init(md_ctx);
 
         if (rsa_pss) {
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
             if (EVP_DigestSignInit(md_ctx, &pctx, md, NULL, pkey) <= 0) {
                 return NGX_ERROR;
             }
@@ -3172,7 +2713,6 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
             sign_len = (unsigned int)siglen;
 
             goto end;
-#endif
         }
 
         EVP_DigestInit_ex(md_ctx, md, NULL);
@@ -3196,11 +2736,7 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
 
 end:
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
         EVP_MD_CTX_free(md_ctx);
-#else
-        EVP_MD_CTX_cleanup(md_ctx);
-#endif
     }
 
     *len = htons(sign_len);
@@ -3231,7 +2767,6 @@ end:
 }
 
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
 static ngx_int_t
 ngx_tcp_lurk_cert_verify(ngx_tcp_session_t *s)
 {
@@ -3388,7 +2923,6 @@ ngx_tcp_lurk_cert_verify(ngx_tcp_session_t *s)
 
     return NGX_OK;
 }
-#endif
 
 
 static ngx_int_t
@@ -3450,21 +2984,17 @@ ngx_tcp_lurk_async_crypto(void *data)
             rc = ngx_tcp_lurk_rsa_master(s);
             break;
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
         case NGX_LURK_QUERY_TYPE_RSA_EXTENDED_MASTER:
             rc = ngx_tcp_lurk_rsa_extended_master(s);
             break;
-#endif
 
         case NGX_LURK_QUERY_TYPE_ECDHE:
             rc = ngx_tcp_lurk_ecdhe(s);
             break;
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
         case NGX_LURK_QUERY_TYPE_CERT_VERIFY:
             rc = ngx_tcp_lurk_cert_verify(s);
             break;
-#endif
 
         case NGX_LURK_QUERY_TYPE_PING:
         case NGX_LURK_QUERY_TYPE_CAP:
@@ -3741,17 +3271,9 @@ ngx_tcp_lurk_load_pkey(ngx_tree_ctx_t *ctx, ngx_str_t *name)
         goto out;
     }
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
     pkey_type = EVP_PKEY_id(pkey);
-#else
-    pkey_type = pkey->type;
-#endif
     if (pkey_type == EVP_PKEY_RSA) {
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
         RSA *rsa = EVP_PKEY_get0_RSA(pkey);
-#else
-        RSA *rsa = pkey->pkey.rsa;
-#endif
         if (RSA_check_key(rsa) != 1) {
             ngx_log_error(NGX_LOG_EMERG, ctx->log, 0,
                           "RSA private key broken: %V", name);
@@ -3762,11 +3284,7 @@ ngx_tcp_lurk_load_pkey(ngx_tree_ctx_t *ctx, ngx_str_t *name)
 
         pkey_size = RSA_size(rsa);
     } else if (pkey_type == EVP_PKEY_EC) {
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
         pkey_size = ECDSA_size(EVP_PKEY_get0_EC_KEY(pkey));
-#else
-        pkey_size = ECDSA_size(pkey->pkey.ec);
-#endif
     } else {
         EVP_PKEY_free(pkey);
         goto out;
@@ -3808,9 +3326,6 @@ out:
 static ngx_int_t
 ngx_tcp_lurk_load_pkey_noop(ngx_tree_ctx_t *ctx, ngx_str_t *name)
 {
-    (void)ctx;
-    (void)name;
-
     return NGX_OK;
 }
 
@@ -3819,8 +3334,8 @@ static ngx_int_t
 ngx_tcp_lurk_load_pkeys_from_file(ngx_conf_t *cf,
     ngx_rbtree_t *pkey_tree, ngx_queue_t *pkey_queue, ngx_str_t *pkey_path)
 {
-    ngx_tree_ctx_t                       tree;
-    ngx_tcp_lurk_walk_tree_data_t       *data;
+    ngx_tree_ctx_t                  tree;
+    ngx_tcp_lurk_walk_tree_data_t  *data;
 
     data = ngx_palloc(cf->pool, sizeof(ngx_tcp_lurk_walk_tree_data_t));
     if (data == NULL) {
@@ -4014,7 +3529,7 @@ ngx_tcp_lurk_limit_keyid_handler(ngx_event_t *ev)
 static char *
 ngx_tcp_lurk_init_main_conf(ngx_conf_t *cf, void *conf)
 {
-    ngx_tcp_lurk_main_conf_t   *mconf = conf;
+    ngx_tcp_lurk_main_conf_t  *mconf = conf;
 
     if (mconf->get_key_mode.len == 0) {
         mconf->remote = 0; // default must be local
@@ -4457,20 +3972,6 @@ ngx_tcp_lurk_finalize_session(ngx_tcp_session_t *s, ngx_int_t success)
 }
 
 
-void hex2bin(const char *hex, size_t len, uint8_t *bin)
-{
-    size_t  i;
-
-    assert(len % 2 == 0);
-
-    for (i = 0; i < len; i += 2) {
-        bin[i/2] = hex2i(hex[i]) * 16 + hex2i(hex[i + 1]);
-    }
-
-    return;
-}
-
-
 ngx_tcp_lurk_key_node_t *
 ngx_tcp_lurk_shm_find_key(ngx_rbtree_t *key_tree, const uint8_t *key_id)
 {
@@ -4512,33 +4013,10 @@ ngx_tcp_lurk_shm_find_key(ngx_rbtree_t *key_tree, const uint8_t *key_id)
 }
 
 
-static int hex2i(char ch)
-{
-    if (ch >= '0' && ch <='9') {
-        return ch - '0';
-    }
-
-    if (ch >= 'a' && ch <= 'f') {
-        return ch - 'a' + 10;
-    }
-
-    if (ch >= 'A' && ch <= 'F') {
-        return ch - 'A' + 10;
-    }
-
-    return 0;
-}
-
-
 static ngx_int_t
 ngx_tcp_lurk_init_module(ngx_cycle_t *cf)
 {
-    (void)cf;
-
-//#if OPENSSL_VERSION_NUMBER < 0x10100003L
     ngx_tcp_lurk_load_ssl_method();
-//#endif
 
     return NGX_OK;
-
 }

@@ -58,12 +58,6 @@ typedef struct {
 
 
 typedef struct {
-    uint32_t                        length;
-    uint8_t                         value[0];
-} ngx_lurk_opaque32_t;
-
-
-typedef struct {
     uint8_t                         qrv; /* q:1, reserved:4, version:3 */
     uint8_t                         type;
     uint64_t                        id;
@@ -82,43 +76,24 @@ typedef struct {
 } ngx_lurk_key_pair_id_t;
 
 
-/* RFC5246 section 7.4.7.1 */
 typedef struct {
+    uint8_t                         master_prf;
+    uint8_t                         client_random[32];
+    uint8_t                         edge_server_random[32];
     uint16_t                        client_version;
-    uint8_t                         value[46];
-} ngx_lurk_pre_master_secret_t;
-
-
-typedef struct {
-    uint8_t                          master_prf;
-    uint8_t                          client_random[32];
-    uint8_t                          edge_server_random[32];
-    uint16_t                         client_version;
-    uint16_t                         edge_server_version;
-    ngx_lurk_opaque16_t              encryped_pre_master_secret;
+    uint16_t                        edge_server_version;
+    ngx_lurk_opaque16_t             encryped_pre_master_secret;
 } ngx_lurk_tls_master_rsa_input_payload_t;
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
-typedef struct {
-    uint8_t                          master_prf;
-    uint8_t                          session_prf;
-    uint8_t                          client_random[32];
-    uint8_t                          edge_server_random[32];
-    uint16_t                         client_version;
-    uint16_t                         edge_server_version;
-} ngx_lurk_tls_extended_master_rsa_entity_t;
-#endif
 
 typedef struct {
-    uint8_t                          master_prf;
-    uint8_t                          session_prf;
-    uint8_t                          client_random[32];
-    uint8_t                          edge_server_random[32];
-    uint16_t                         client_version;
-    uint16_t                         edge_server_version;
-    ngx_lurk_opaque16_t             *encryped_pre_master_secret;
-    ngx_lurk_opaque16_t             *session_hash;
-} ngx_lurk_tls_extended_master_rsa_input_payload_t;
+    uint8_t                         master_prf;
+    uint8_t                         session_prf;
+    uint8_t                         client_random[32];
+    uint8_t                         edge_server_random[32];
+    uint16_t                        client_version;
+    uint16_t                        edge_server_version;
+} ngx_lurk_tls_extended_master_rsa_entity_t;
 
 
 typedef struct {
@@ -134,15 +109,12 @@ typedef struct {
     uint8_t                          ecdhe_params[0];
 } ngx_lurk_tls_ecdhe_input_payload_t;
 
+
 typedef struct {
     uint8_t                          client_random[32];
     uint8_t                          edge_server_random[32];
     uint16_t                         version;
 } ngx_lurk_tls_chaos_enc_info_t;
-
-typedef struct {
-    ngx_lurk_opaque16_t              signature;
-} ngx_lurk_tls_digitally_signed_payloads_t;
 
 
 typedef struct {
@@ -150,19 +122,12 @@ typedef struct {
     uint16_t                         length;
 } ngx_lurk_proto_item_t;
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
+
 typedef struct {
     uint16_t                         version;
     uint16_t                         signature_scheme;
 } ngx_lurk_tls_cert_verify_entity_t;
 
-typedef struct {
-    uint16_t                         version;
-    uint16_t                         signature_scheme;
-    ngx_str_t                        master_key;
-    ngx_str_t                        hdata;
-} ngx_lurk_tls_cert_verify_input_payload_t;
-#endif
 
 #if (NGX_HAVE_PACK_PRAGMA)
 #pragma pack(pop)
@@ -197,9 +162,7 @@ typedef enum {
     NGX_LURK_QUERY_TYPE_PFS_RSA_MASTER                  = 4,
     NGX_LURK_QUERY_TYPE_ECDHE                           = 5,
     NGX_LURK_QUERY_TYPE_PFS_NON_PREDICTABLE_ECDHE       = 6,
-#if OPENSSL_VERSION_NUMBER >= 0x10100003L
     NGX_LURK_QUERY_TYPE_CERT_VERIFY                     = 7,
-#endif
 } ngx_lurk_query_type_t;
 
 
@@ -232,32 +195,5 @@ typedef enum {
     NGX_LURK_TLS_PRF_SHA384                             = 1,
     NGX_LURK_TLS_PRF_MD5SHA1                            = 2,
 } ngx_lurl_prf_algorithm_t;
-
-
-/* defined in TLS1.3 section 4.8.1 */
-typedef enum {
-    /* RSASSA-PKCS-v1_5 algorithms */
-    NGX_LURK_SIGNATURE_SCHEME_RSA_PKCS1_SHA1            = 0x0201,
-    NGX_LURK_SIGNATURE_SCHEME_RSA_PKCS1_SHA256          = 0x0401,
-    NGX_LURK_SIGNATURE_SCHEME_RSA_PKCS1_SHA384          = 0x0501,
-    NGX_LURK_SIGNATURE_SCHEME_RSA_PKCS1_SHA512          = 0x0601,
-
-    /* ECDSA algorithms */
-    NGX_LURK_SIGNATURE_SCHEME_ECDSA_SECP256R1_SHA256    = 0x0403,
-    NGX_LURK_SIGNATURE_SCHEME_ECDSA_SECP384R1_SHA384    = 0x0503,
-    NGX_LURK_SIGNATURE_SCHEME_ECDSA_SECP521R1_SHA512    = 0x0603,
-
-    /* RSASSA-PSS algorithms */
-    NGX_LURK_SIGNATURE_SCHEME_RSA_PSS_SHA256            = 0x0700,
-    NGX_LURK_SIGNATURE_SCHEME_RSA_PSS_SHA384            = 0x0701,
-    NGX_LURK_SIGNATURE_SCHEME_RSA_PSS_SHA512            = 0x0702,
-
-    /* EdDSA algorithms */
-
-    NGX_LURK_SIGNATURE_SCHEME_ED25519                   = 0x0703,
-    NGX_LURK_SIGNATURE_SCHEME_ED448                     = 0x0704,
-
-} ngx_lurk_signature_scheme_t;
-
 
 #endif /* _NGX_TCP_LURK_H_INCLUDED_ */
